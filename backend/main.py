@@ -27,7 +27,7 @@ KALSHI_MARKET_SERIES = {
   ("NCAAF", "total"): "KXNCAAFTOTAL",
   ("NCAAF", "moneyline"): "KXNCAAFGAME",
 }
-BLUECHIP_WEEK_URL = os.getenv("BLUECHIP_WEEK_URL", "https://bluechipanalytics.com/college-football/games/2026/week3/")
+BLUECHIP_WEEK_URL = os.getenv("BLUECHIP_WEEK_URL", "https://bluechipanalytics.com/college-football/games/2026/week4/")
 BLUECHIP_CACHE_SECONDS = int(os.getenv("BLUECHIP_CACHE_SECONDS", "1800"))
 KALSHI_INCLUDE_UNMODELED = os.getenv("KALSHI_INCLUDE_UNMODELED", "true").lower() in {"1", "true", "yes"}
 ROOT = Path(__file__).resolve().parent
@@ -138,6 +138,44 @@ def signed_line(team: str | None, spread: float | None) -> str | None:
   if not team or spread is None:
     return None
   return f"{team} {spread:+.1f}".replace("+", "")
+
+
+def plain_text(page: str) -> str:
+  text = re.sub(r"<[^>]+>", " ", page)
+  return clean_text(re.sub(r"\s+", " ", text)) or ""
+
+
+def betting_value(page: str, label: str) -> str | None:
+  match = re.search(
+    rf'<dt[^>]*class="bb-label"[^>]*>{re.escape(label)}</dt>\s*<dd[^>]*class="bb-value"[^>]*>(.*?)</dd>',
+    page,
+    re.I | re.S,
+  )
+  if not match:
+    return None
+  return clean_text(re.sub(r"<[^>]+>", " ", match.group(1)).replace("&ndash;", "-"))
+
+
+def parse_team_line(value: str | None) -> tuple[str | None, float | None]:
+  if not value:
+    return None, None
+  match = re.search(r"(.+?)\s+([+-]?\d+(?:\.\d+)?)$", clean_text(value) or "")
+  if not match:
+    return None, None
+  return clean_text(match.group(1)), float(match.group(2))
+
+
+def spread_gap_and_edge(away_team: str, home_team: str, market_team: str | None, market_spread: float | None, model_team: str | None, model_spread: float | None) -> tuple[float | None, str | None]:
+  if not market_team or market_spread is None or not model_team or model_spread is None:
+    return None, None
+  market_margin = -market_spread
+  model_margin_for_market_team = -model_spread if team_key(model_team) == team_key(market_team) else model_spread
+  gap = round(abs(model_margin_for_market_team - market_margin), 1)
+  if abs(model_margin_for_market_team - market_margin) < 0.05:
+    return gap, None
+  if model_margin_for_market_team > market_margin:
+    return gap, market_team
+  return gap, opponent_team(away_team, home_team, market_team)
 
 
 def opponent_team(away_team: str, home_team: str, team: str | None) -> str | None:
@@ -321,6 +359,66 @@ def weather_impact(bluechip: dict[str, Any] | None, baseline_total: float | None
   }
 
 
+def projection_summary(away_team: str, home_team: str, bluechip: dict[str, Any] | None, impact: dict[str, Any] | None) -> dict[str, Any] | None:
+  if not bluechip:
+    return None
+  model_team = bluechip.get("model_team")
+  model_spread = dollars_to_float(bluechip.get("model_spread"))
+  market_team = bluechip.get("market_team")
+  market_spread = dollars_to_float(bluechip.get("market_spread"))
+  book_total = dollars_to_float(bluechip.get("book_total"))
+  projected_total = dollars_to_float((impact or {}).get("adjusted_total")) if impact else None
+  if projected_total is None:
+    projected_total = book_total
+
+  model_winner = None
+  model_margin = None
+  if model_team and model_spread is not None:
+    model_margin = abs(model_spread)
+    model_winner = model_team if model_spread <= 0 else opponent_team(away_team, home_team, model_team)
+  if not model_winner and model_team:
+    model_winner = model_team
+
+  projected_score = None
+  if projected_total is not None and model_winner and model_margin is not None:
+    home_margin = model_margin if team_key(model_winner) == team_key(home_team) else -model_margin
+    home_points = (projected_total + home_margin) / 2
+    away_points = (projected_total - home_margin) / 2
+    projected_score = {
+      "away_team": away_team,
+      "away_points": round(away_points, 1),
+      "home_team": home_team,
+      "home_points": round(home_points, 1),
+      "label": f"{away_team} {away_points:.1f}, {home_team} {home_points:.1f}",
+    }
+
+  total_edge = None if projected_total is None or book_total is None else round(projected_total - book_total, 1)
+  total_lean = None
+  if total_edge is not None:
+    if total_edge >= 0.5:
+      total_lean = "Over"
+    elif total_edge <= -0.5:
+      total_lean = "Under"
+    else:
+      total_lean = "No clear total edge"
+
+  model_label = None if model_winner is None or model_margin is None else f"{model_winner} by {model_margin:.1f}"
+  return {
+    "model_winner": model_winner,
+    "model_margin": None if model_margin is None else round(model_margin, 1),
+    "model_label": model_label,
+    "model_line": signed_line(model_team, model_spread),
+    "market_line": signed_line(market_team, market_spread),
+    "edge_team": bluechip.get("edge_team"),
+    "spread_edge": bluechip.get("gap"),
+    "book_total": book_total,
+    "projected_total": projected_total,
+    "total_edge": total_edge,
+    "total_lean": total_lean,
+    "projected_score": projected_score,
+  }
+
+
 def gap_confidence(model_gap: float | None) -> int:
   if model_gap is None:
     return 46
@@ -398,6 +496,9 @@ def rating_for_market(bet_type: str, market: dict[str, Any], bluechip: dict[str,
 
 
 def parse_bluechip_game(page: str, url: str) -> dict[str, Any] | None:
+  text = plain_text(page)
+  answer_match = re.search(r'<div class="answer-capsule".*?</div>', page, re.I | re.S)
+  answer_text = plain_text(answer_match.group(0)) if answer_match else text
   title_match = re.search(r"<title>(.*?)\s+Prediction,", page, re.I | re.S)
   if not title_match:
     return None
@@ -408,22 +509,42 @@ def parse_bluechip_game(page: str, url: str) -> dict[str, Any] | None:
 
   line_match = re.search(
     r"The market has (?P<market_team>.+?) (?P<market_spread>[+-]?\d+(?:\.\d+)?) and the Blue Chip model makes it (?P<model_team>.+?) (?P<model_spread>[+-]?\d+(?:\.\d+)?) - a gap of (?P<gap>\d+(?:\.\d+)?) points toward (?P<edge_team>.+?)(?:,|\.)",
-    page,
+    text,
+    re.I | re.S,
+  )
+  if not line_match:
+    line_match = re.search(
+      r"The model makes it (?P<model_team>.+?) (?P<model_spread>[+-]?\d+(?:\.\d+)?) against a book line of (?P<market_team>.+?) (?P<market_spread>[+-]?\d+(?:\.\d+)?); it sees .*? (?P<gap>\d+(?:\.\d+)?) points? off the spread",
+      text,
+      re.I | re.S,
+    )
+  summary_line_match = re.search(
+    r"market line is (?P<market_team>.+?) (?P<market_spread>[+-]?\d+(?:\.\d+)?) and our model shows (?P<model_team>.+?) (?P<model_spread>[+-]?\d+(?:\.\d+)?)\s*; (?P<verdict>.+?)\.",
+    answer_text,
     re.I | re.S,
   )
   weather_match = re.search(
     r"The forecast for (?P<venue>.+?) shows (?P<condition>.+?), (?P<temp>\d+(?:\.\d+)?)\s*[°\ufffd]F with winds of (?P<wind>\d+(?:\.\d+)?) mph",
-    page,
+    text,
     re.I | re.S,
   )
   desc_match = re.search(r'<meta name="description" content="([^"]+)"', page, re.I)
   image_match = re.search(r'<meta property="og:image"\s+content="([^"]+)"', page, re.I)
   modified_match = re.search(r'"dateModified":\s*"([^"]+)"', page, re.I)
 
-  market_team = clean_text(line_match.group("market_team")) if line_match else None
-  model_team = clean_text(line_match.group("model_team")) if line_match else None
-  market_spread = float(line_match.group("market_spread")) if line_match else None
-  model_spread = float(line_match.group("model_spread")) if line_match else None
+  spread_text = betting_value(page, "Spread")
+  total_text = betting_value(page, "Total")
+  implied_score = betting_value(page, "Odds implied score")
+  capsule_model_match = re.search(r'id="capsuleModelLine"[^>]*>(.*?)</span>', page, re.I | re.S)
+  capsule_model_team, capsule_model_spread = parse_team_line(re.sub(r"<[^>]+>", " ", capsule_model_match.group(1)) if capsule_model_match else None)
+  betting_source_match = re.search(r'<p class="bb-source">(.*?)</p>', page, re.I | re.S)
+  betting_source = clean_text(re.sub(r"<[^>]+>", " ", betting_source_match.group(1))) if betting_source_match else None
+  spread_source = summary_line_match or line_match
+
+  market_team = clean_text(spread_source.group("market_team")) if spread_source else None
+  model_team = capsule_model_team or (clean_text(spread_source.group("model_team")) if spread_source else None)
+  market_spread = float(spread_source.group("market_spread")) if spread_source else None
+  model_spread = capsule_model_spread if capsule_model_spread is not None else (float(spread_source.group("model_spread")) if spread_source else None)
   desc_text = clean_text(desc_match.group(1)) if desc_match else None
 
   if desc_text and (market_spread is None or model_spread is None):
@@ -443,9 +564,18 @@ def parse_bluechip_game(page: str, url: str) -> dict[str, Any] | None:
         market_team = market_opponent
         market_spread = -market_spread
 
-  gap = float(line_match.group("gap")) if line_match else None
-  if gap is None and market_spread is not None and model_spread is not None:
-    gap = round(abs(model_spread - market_spread), 1)
+  gap = float(line_match.group("gap")) if not summary_line_match and line_match and "gap" in line_match.groupdict() and line_match.group("gap") else None
+
+  edge_team = clean_text(line_match.group("edge_team")) if line_match and "edge_team" in line_match.groupdict() else None
+  if not edge_team and summary_line_match:
+    verdict = clean_text(summary_line_match.group("verdict")) or ""
+    lean_match = re.search(r"lean toward (.+)$", verdict, re.I)
+    edge_team = clean_text(lean_match.group(1)) if lean_match else None
+  normalized_gap, normalized_edge_team = spread_gap_and_edge(away_team, home_team, market_team, market_spread, model_team, model_spread)
+  if normalized_gap is not None:
+    gap = normalized_gap
+  if not edge_team:
+    edge_team = normalized_edge_team
 
   return {
     "away_team": away_team,
@@ -457,7 +587,11 @@ def parse_bluechip_game(page: str, url: str) -> dict[str, Any] | None:
     "market_spread": market_spread,
     "model_spread": model_spread,
     "gap": gap,
-    "edge_team": clean_text(line_match.group("edge_team")) if line_match else None,
+    "edge_team": edge_team,
+    "book_spread": spread_text,
+    "book_total": dollars_to_float(total_text),
+    "odds_implied_score": implied_score,
+    "betting_source": betting_source,
     "summary": desc_text,
     "weather": {
       "venue": clean_text(weather_match.group("venue")) if weather_match else None,
@@ -614,8 +748,9 @@ async def fetch_kalshi_board() -> tuple[list[dict[str, Any]], str]:
         if last_price is not None and previous_price is not None and previous_price > 0:
           price_move = round((last_price - previous_price) * 100, 1)
         cover_price = yes_bid if yes_bid is not None else last_price
-        baseline_total = dollars_to_float(market.get("floor_strike")) if bet_type == "total" else None
+        baseline_total = dollars_to_float(market.get("floor_strike")) if bet_type == "total" else dollars_to_float((bluechip or {}).get("book_total"))
         impact = weather_impact(bluechip, baseline_total)
+        projection = projection_summary(away_team, home_team, bluechip, impact)
         model_gap = contract_model_gap(bet_type, market, bluechip, impact)
         rating = rating_for_market(bet_type, market, bluechip, impact, model_gap, cover_price)
         weather_score = impact.get("score", 0) if impact else 0
@@ -665,6 +800,7 @@ async def fetch_kalshi_board() -> tuple[list[dict[str, Any]], str]:
             },
             "bluechip": bluechip,
             "weather_impact": impact,
+            "projection": projection,
             "rating": rating,
             "metrics": {
               "model_market_gap": model_gap,

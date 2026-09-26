@@ -53,6 +53,10 @@ type BoardRow = {
     model_spread: number | null
     gap: number | null
     edge_team: string | null
+    book_spread: string | null
+    book_total: number | null
+    odds_implied_score: string | null
+    betting_source: string | null
     summary: string | null
     weather: {
       venue: string | null
@@ -65,6 +69,26 @@ type BoardRow = {
     source: string
     url: string
     updated_at: string | null
+  } | null
+  projection?: {
+    model_winner: string | null
+    model_margin: number | null
+    model_label: string | null
+    model_line: string | null
+    market_line: string | null
+    edge_team: string | null
+    spread_edge: number | null
+    book_total: number | null
+    projected_total: number | null
+    total_edge: number | null
+    total_lean: string | null
+    projected_score: {
+      away_team: string
+      away_points: number
+      home_team: string
+      home_points: number
+      label: string
+    } | null
   } | null
   weather_impact?: {
     score: number
@@ -145,6 +169,38 @@ function coverOdds(row: BoardRow) {
 
 function modelGap(row: BoardRow) {
   return row.bluechip?.gap ?? row.metrics.model_market_gap ?? null
+}
+
+function spreadEdge(row: BoardRow) {
+  return row.projection?.spread_edge ?? modelGap(row)
+}
+
+function modelOpinion(row: BoardRow) {
+  return row.projection?.model_label ?? row.projection?.model_line ?? row.bluechip?.model_line ?? 'Model unavailable'
+}
+
+function marketSpread(row: BoardRow) {
+  return row.projection?.market_line ?? row.bluechip?.market_line ?? consensusLabel(row)
+}
+
+function spreadDecision(row: BoardRow) {
+  const edgeTeam = row.projection?.edge_team
+  const edge = spreadEdge(row)
+  if (edgeTeam && edge !== null && Number.isFinite(edge)) return `${edgeTeam} +${edge.toFixed(1)} vs spread`
+  if (edge !== null && Number.isFinite(edge)) return `${formatSigned(edge)} pts vs spread`
+  return 'Spread edge unavailable'
+}
+
+function projectedTotal(row: BoardRow) {
+  const projection = row.projection
+  if (projection?.projected_total === null || projection?.projected_total === undefined) return 'Projected total unavailable'
+  const market = projection.book_total ? ` vs ${formatNumber(projection.book_total)}` : ''
+  const lean = projection.total_lean && projection.total_lean !== 'No clear total edge' ? ` ${projection.total_lean}` : ''
+  return `${formatNumber(projection.projected_total)}${market}${lean}`
+}
+
+function projectedScore(row: BoardRow) {
+  return row.projection?.projected_score?.label ?? row.bluechip?.odds_implied_score ?? '-'
 }
 
 function formatWeather(row: BoardRow) {
@@ -358,7 +414,7 @@ function App() {
       } else if (sortKey === 'line') {
         result = compareNumber(lineValue(a), lineValue(b), sortDirection)
       } else if (sortKey === 'gap') {
-        result = compareNumber(modelGap(a), modelGap(b), sortDirection)
+        result = compareNumber(spreadEdge(a), spreadEdge(b), sortDirection)
       } else if (sortKey === 'rating') {
         result = compareNumber(a.rating?.probability, b.rating?.probability, sortDirection)
       } else if (sortKey === 'weather') {
@@ -376,7 +432,7 @@ function App() {
 
   const selectedRow = rows.find((row) => row.game_id === selectedGameId) ?? rows[0] ?? null
   const topGap = rows.reduce<number | null>((largest, row) => {
-    const gap = modelGap(row)
+    const gap = spreadEdge(row)
     if (gap === null || !Number.isFinite(gap) || gap <= 0) return largest
     return largest === null || gap > largest ? gap : largest
   }, null)
@@ -465,7 +521,7 @@ function App() {
                   <div>
                     <p className="eyebrow">{selectedRow.sport} / {marketTypeLabel(selectedRow)}</p>
                     <h3>{selectedRow.away_team} vs {selectedRow.home_team}</h3>
-                    <p>{selectedRow.contract?.title ?? consensusLabel(selectedRow)}</p>
+                    <p>Model says {modelOpinion(selectedRow)}. {spreadDecision(selectedRow)}.</p>
                   </div>
                   <div className={`ticket-rating ${ratingClass(selectedRow)}`}>
                     <span>{ratingGrade(selectedRow)}</span>
@@ -475,28 +531,28 @@ function App() {
 
                 <div className="ticket-grid" aria-label="Selected market details">
                   <div>
-                    <span>Line</span>
-                    <strong>{consensusLabel(selectedRow)}</strong>
-                  </div>
-                  <div>
                     <span>Model</span>
-                    <strong>{selectedRow.bluechip?.model_line ?? 'Unavailable'}</strong>
+                    <strong>{modelOpinion(selectedRow)}</strong>
                   </div>
                   <div>
-                    <span>Gap</span>
-                    <strong>{formatSigned(modelGap(selectedRow))}</strong>
+                    <span>Market spread</span>
+                    <strong>{marketSpread(selectedRow)}</strong>
+                  </div>
+                  <div>
+                    <span>Cover edge</span>
+                    <strong>{spreadDecision(selectedRow)}</strong>
+                  </div>
+                  <div>
+                    <span>Projected total</span>
+                    <strong>{projectedTotal(selectedRow)}</strong>
+                  </div>
+                  <div>
+                    <span>Projected score</span>
+                    <strong>{projectedScore(selectedRow)}</strong>
                   </div>
                   <div>
                     <span>Odds</span>
                     <strong>{formatCents(coverOdds(selectedRow))}</strong>
-                  </div>
-                  <div>
-                    <span>Move</span>
-                    <strong>{formatSigned(selectedRow.metrics.line_move)}</strong>
-                  </div>
-                  <div>
-                    <span>Weather</span>
-                    <strong>{formatWeatherImpact(selectedRow) ?? 'No material adjustment'}</strong>
                   </div>
                 </div>
               </div>
@@ -541,7 +597,7 @@ function App() {
               Date<span>{sortLabel('date')}</span>
             </button>
             <button className={sortKey === 'line' ? 'active' : ''} onClick={() => toggleSort('line')} type="button">
-              Line<span>{sortLabel('line')}</span>
+              Model<span>{sortLabel('line')}</span>
             </button>
             <button className={sortKey === 'gap' ? 'active' : ''} onClick={() => toggleSort('gap')} type="button">
               Gap<span>{sortLabel('gap')}</span>
@@ -587,13 +643,13 @@ function App() {
                         <small>{row.sport}</small>
                       </span>
                       <span className="row-market">
-                        <span className="mobile-label">Line</span>
-                        <strong>{consensusLabel(row)}</strong>
-                        <small>{row.bluechip?.model_line ? `Model ${row.bluechip.model_line}` : 'Model gap unavailable'}</small>
+                        <span className="mobile-label">Model</span>
+                        <strong>{modelOpinion(row)}</strong>
+                        <small>{marketSpread(row)} / {spreadDecision(row)}</small>
                       </span>
                       <span className="row-gap">
                         <span className="mobile-label">Gap</span>
-                        <strong>{formatSigned(modelGap(row))}</strong>
+                        <strong>{formatSigned(spreadEdge(row))}</strong>
                       </span>
                       <span className="row-rating">
                         <span className="mobile-label">Rating</span>
@@ -618,7 +674,7 @@ function App() {
                       <span className="row-odds">
                         <span className="mobile-label">Odds</span>
                         <strong>{formatCents(coverOdds(row))}</strong>
-                        <small>Move {formatSigned(row.metrics.line_move)}</small>
+                        <small>Total {projectedTotal(row)}</small>
                       </span>
                     </div>
                     {expanded ? (
