@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 
 type SportLabel = 'ALL' | 'NFL' | 'NCAAF'
+type PageKey = 'board' | 'top10' | 'picks' | 'performance' | 'settings'
+type MarketFilter = 'all' | 'spread' | 'total'
 type SortDirection = 'asc' | 'desc'
 type SortKey = 'edge' | 'game' | 'date' | 'line' | 'gap' | 'rating' | 'weather' | 'odds' | 'move'
 const REFRESH_MS = 5 * 60 * 1000
@@ -116,8 +118,12 @@ type BoardRow = {
   } | null
   metrics: {
     model_market_gap: number | null
+    raw_projection_gap?: number | null
+    adjusted_projection_gap?: number | null
     line_move: number | null
     confidence_score: number
+    data_quality?: number | null
+    confidence_label?: 'Low' | 'Medium' | 'High' | string | null
   }
   rating?: {
     probability: number | null
@@ -177,12 +183,55 @@ function oddsSide(row: BoardRow) {
   return `${side}: ${label}`
 }
 
+function riskNotes(row: BoardRow) {
+  const notes: string[] = []
+  const move = row.metrics.line_move
+  if (move !== null && Math.abs(move) >= 2) notes.push(`Line has moved ${formatSigned(move)} since the previous Kalshi price.`)
+  if (dataQuality(row) < 70) notes.push(`Data quality is ${dataQuality(row)}/100, so confidence is capped.`)
+  if (row.bet_type === 'total' && row.projection?.projected_total === null) notes.push('No independent total model is attached yet.')
+  if (row.weather_impact && Math.abs(row.weather_impact.total_adjustment) >= 1) notes.push(`Weather is moving the total ${formatSigned(row.weather_impact.total_adjustment)} points.`)
+  return notes.length ? notes : ['No major risk flag is attached to the current inputs.']
+}
+
+function historyNote(row: BoardRow) {
+  if (row.sport === 'NFL') return 'Historical similar games require the nflverse backtest layer from the spec.'
+  if (row.sport === 'NCAAF') return 'Historical cover rates require stored closing lines and final results.'
+  return 'Historical validation is pending.'
+}
+
 function modelGap(row: BoardRow) {
   return row.bluechip?.gap ?? row.metrics.model_market_gap ?? null
 }
 
 function spreadEdge(row: BoardRow) {
   return row.projection?.spread_edge ?? modelGap(row)
+}
+
+function rawProjectionGap(row: BoardRow) {
+  return row.metrics.raw_projection_gap ?? spreadEdge(row)
+}
+
+function dataQuality(row: BoardRow) {
+  return row.metrics.data_quality ?? (row.projection?.model_label ? 78 : 48)
+}
+
+function adjustedProjectionGap(row: BoardRow) {
+  const metric = row.metrics.adjusted_projection_gap
+  if (metric !== null && metric !== undefined && Number.isFinite(metric)) return metric
+  const raw = rawProjectionGap(row)
+  const quality = dataQuality(row)
+  if (raw === null || !Number.isFinite(raw)) return null
+  const multiplier = quality >= 90 ? 1 : quality >= 80 ? 0.95 : quality >= 70 ? 0.9 : quality >= 60 ? 0.8 : 0.65
+  return Number((raw * multiplier).toFixed(2))
+}
+
+function confidenceLabel(row: BoardRow) {
+  return row.metrics.confidence_label ?? (dataQuality(row) >= 80 && (rawProjectionGap(row) ?? 0) >= 4 ? 'High' : 'Medium')
+}
+
+function hasStarted(row: BoardRow) {
+  const timestamp = dateValue(row.commence_time)
+  return timestamp !== null && timestamp <= Date.now()
 }
 
 function modelOpinion(row: BoardRow) {
@@ -368,12 +417,18 @@ async function fetchBoard(): Promise<BoardResponse> {
 
 function App() {
   const [board, setBoard] = useState<BoardResponse>(emptyBoard)
+  const [activePage, setActivePage] = useState<PageKey>('board')
   const [selectedSport, setSelectedSport] = useState<SportLabel>('NCAAF')
   const [sortKey, setSortKey] = useState<SortKey>('edge')
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
   const [selectedGameId, setSelectedGameId] = useState('')
   const [expandedRatingId, setExpandedRatingId] = useState('')
   const [teamSearch, setTeamSearch] = useState('')
+  const [topLeague, setTopLeague] = useState<SportLabel>('ALL')
+  const [topMarket, setTopMarket] = useState<MarketFilter>('spread')
+  const [minGap, setMinGap] = useState(1)
+  const [minConfidence, setMinConfidence] = useState(0)
+  const [weekMode, setWeekMode] = useState('Current Week')
   const [refreshing, setRefreshing] = useState(false)
 
   useEffect(() => {
@@ -440,23 +495,57 @@ function App() {
     })
   }, [board.rows, selectedSport, sortDirection, sortKey, teamSearch])
 
-  const selectedRow = rows.find((row) => row.game_id === selectedGameId) ?? rows[0] ?? null
-  const topGap = rows.reduce<number | null>((largest, row) => {
+  const topGapRows = useMemo(() => {
+    const exactTeamKeys = new Set<string>()
+    for (const row of board.rows) {
+      exactTeamKeys.add(normalizeTeam(row.away_team))
+      exactTeamKeys.add(normalizeTeam(row.home_team))
+    }
+    const query = teamSearch.trim()
+    const grouped = new Map<string, BoardRow>()
+    for (const row of board.rows) {
+      const rawGap = rawProjectionGap(row)
+      if (topLeague !== 'ALL' && row.sport !== topLeague) continue
+      if (topMarket !== 'all' && row.bet_type !== topMarket) continue
+      if (query && !rowMatchesSearch(row, query, exactTeamKeys)) continue
+      if (hasStarted(row)) continue
+      if (rawGap === null || !Number.isFinite(rawGap) || rawGap < minGap) continue
+      if ((row.metrics.confidence_score ?? 0) < minConfidence) continue
+      grouped.set(marketGroupKey(row), bestMarketRow(grouped.get(marketGroupKey(row)), row))
+    }
+    return [...grouped.values()]
+      .sort((a, b) => {
+        const adjusted = compareNumber(adjustedProjectionGap(a), adjustedProjectionGap(b), 'desc')
+        if (adjusted) return adjusted
+        const raw = compareNumber(rawProjectionGap(a), rawProjectionGap(b), 'desc')
+        if (raw) return raw
+        const confidence = compareNumber(a.metrics.confidence_score, b.metrics.confidence_score, 'desc')
+        if (confidence) return confidence
+        return compareNumber(dateValue(a.updated_at), dateValue(b.updated_at), 'desc')
+      })
+      .slice(0, 10)
+  }, [board.rows, minConfidence, minGap, teamSearch, topLeague, topMarket])
+
+  const visibleRows = activePage === 'top10' ? topGapRows : rows
+  const selectedRow = visibleRows.find((row) => row.game_id === selectedGameId) ?? visibleRows[0] ?? null
+  const topGap = visibleRows.reduce<number | null>((largest, row) => {
     const gap = spreadEdge(row)
     if (gap === null || !Number.isFinite(gap) || gap <= 0) return largest
     return largest === null || gap > largest ? gap : largest
   }, null)
-  const latestUpdate = rows.reduce<string | null>((latest, row) => {
+  const latestUpdate = visibleRows.reduce<string | null>((latest, row) => {
     if (!latest) return row.updated_at
     return new Date(row.updated_at) > new Date(latest) ? row.updated_at : latest
   }, null)
-  const topRatedRows = rows.filter((row) => ratingGrade(row) !== 'Even').length
-  const averageEdge = rows.length
-    ? rows.reduce((total, row) => total + Math.max(spreadEdge(row) ?? 0, 0), 0) / rows.length
+  const topRatedRows = visibleRows.filter((row) => ratingGrade(row) !== 'Even').length
+  const averageEdge = visibleRows.length
+    ? visibleRows.reduce((total, row) => total + Math.max(spreadEdge(row) ?? 0, 0), 0) / visibleRows.length
     : null
-  const hasModelRows = rows.some((row) => row.projection?.model_label || row.bluechip?.model_line)
+  const hasModelRows = visibleRows.some((row) => row.projection?.model_label || row.bluechip?.model_line)
   const modelSource =
-    selectedSport === 'NCAAF'
+    activePage === 'top10'
+      ? 'Spread models where available'
+      : selectedSport === 'NCAAF'
       ? 'Blue Chip model'
       : selectedSport === 'NFL' && hasModelRows
         ? 'Team ratings model'
@@ -496,16 +585,27 @@ function App() {
             ['NFL', 'NFL'],
           ] as [SportLabel, string][]).map(([sport, label]) => (
             <button
-              className={selectedSport === sport ? 'selected' : ''}
+              className={activePage === 'board' && selectedSport === sport ? 'selected' : ''}
               key={sport}
-              onClick={() => setSelectedSport(sport)}
+              onClick={() => {
+                setActivePage('board')
+                setSelectedSport(sport)
+              }}
               type="button"
             >
               {label}
             </button>
           ))}
-          <button type="button">My Picks</button>
-          <button type="button">Model Performance</button>
+          <button
+            className={activePage === 'top10' ? 'selected' : ''}
+            onClick={() => setActivePage('top10')}
+            type="button"
+          >
+            Top 10 Gaps
+          </button>
+          <button className={activePage === 'picks' ? 'selected' : ''} onClick={() => setActivePage('picks')} type="button">My Picks</button>
+          <button className={activePage === 'performance' ? 'selected' : ''} onClick={() => setActivePage('performance')} type="button">Model Performance</button>
+          <button className={activePage === 'settings' ? 'selected' : ''} onClick={() => setActivePage('settings')} type="button">Settings</button>
         </nav>
         <div className="header-date">{latestUpdate ? formatDate(latestUpdate) : 'Loading'}</div>
       </header>
@@ -528,9 +628,12 @@ function App() {
           <div className="segmented three">
             {(['ALL', 'NFL', 'NCAAF'] as SportLabel[]).map((sport) => (
               <button
-                className={selectedSport === sport ? 'selected' : ''}
+                className={activePage === 'board' && selectedSport === sport ? 'selected' : ''}
                 key={sport}
-                onClick={() => setSelectedSport(sport)}
+                onClick={() => {
+                  setActivePage('board')
+                  setSelectedSport(sport)
+                }}
                 type="button"
               >
                 {sport}
@@ -539,14 +642,23 @@ function App() {
           </div>
         </div>
 
+        <button
+          className={`nav-card ${activePage === 'top10' ? 'selected' : ''}`}
+          onClick={() => setActivePage('top10')}
+          type="button"
+        >
+          <span>Top 10 Projection Gaps</span>
+          <small>NFL + NCAA spread board</small>
+        </button>
+
         <div className="feed-note">
           <span>{refreshing ? 'Updating now' : 'Auto-updates every 5 min'}</span>
-          <small>{rows.length.toLocaleString()} ranked lines</small>
+          <small>{visibleRows.length.toLocaleString()} ranked lines</small>
         </div>
 
         <div className="side-card">
           <h3>Quick stats</h3>
-          <p><span>Total lines</span><strong>{rows.length.toLocaleString()}</strong></p>
+          <p><span>Total lines</span><strong>{visibleRows.length.toLocaleString()}</strong></p>
           <p><span>Top rated</span><strong>{topRatedRows.toLocaleString()}</strong></p>
           <p><span>Avg edge</span><strong>{formatSigned(averageEdge)}</strong></p>
         </div>
@@ -563,14 +675,54 @@ function App() {
       <section className="content">
         <div className="topbar">
           <div>
-            <p className="eyebrow">{selectedSport === 'ALL' ? 'All football' : selectedSport} board</p>
-            <h2>{selectedSport === 'NFL' ? 'NFL market board' : 'Best model edges'}</h2>
+            <p className="eyebrow">
+              {activePage === 'top10' ? 'Weekly combined ranking' : `${selectedSport === 'ALL' ? 'All football' : selectedSport} board`}
+            </p>
+            <h2>{activePage === 'top10' ? 'Top 10 Projection Gaps' : selectedSport === 'NFL' ? 'NFL market board' : 'Best model edges'}</h2>
             <p className="board-meta">
-              {rows.length.toLocaleString()} lines · Top gap {formatSigned(topGap)} · {modelSource} · {oddsSource}
+              {visibleRows.length.toLocaleString()} lines · Top gap {formatSigned(topGap)} · {modelSource} · {oddsSource}
               {latestUpdate ? ` · Updated ${formatDate(latestUpdate)}` : ''}
             </p>
           </div>
         </div>
+
+        {activePage === 'top10' ? (
+          <section className="gap-controls" aria-label="Top projection gap controls">
+            <label>
+              <span>Week</span>
+              <select onChange={(event) => setWeekMode(event.target.value)} value={weekMode}>
+                <option>Current Week</option>
+                <option>Previous Week</option>
+                <option>Next Week</option>
+                <option>Custom Week</option>
+              </select>
+            </label>
+            <label>
+              <span>League</span>
+              <select onChange={(event) => setTopLeague(event.target.value as SportLabel)} value={topLeague}>
+                <option value="ALL">NFL + NCAA</option>
+                <option value="NFL">NFL</option>
+                <option value="NCAAF">NCAA FBS</option>
+              </select>
+            </label>
+            <label>
+              <span>Market</span>
+              <select onChange={(event) => setTopMarket(event.target.value as MarketFilter)} value={topMarket}>
+                <option value="spread">Spread</option>
+                <option value="total">Total</option>
+                <option value="all">All</option>
+              </select>
+            </label>
+            <label>
+              <span>Min gap</span>
+              <input min="0" onChange={(event) => setMinGap(Number(event.target.value) || 0)} step="0.5" type="number" value={minGap} />
+            </label>
+            <label>
+              <span>Min confidence</span>
+              <input min="0" max="100" onChange={(event) => setMinConfidence(Number(event.target.value) || 0)} step="5" type="number" value={minConfidence} />
+            </label>
+          </section>
+        ) : null}
 
         {selectedSport === 'NFL' && !hasModelRows ? (
           <div className="notice model-notice">
@@ -608,6 +760,18 @@ function App() {
                     <strong>{spreadDecision(selectedRow)}</strong>
                   </div>
                   <div>
+                    <span>Raw gap</span>
+                    <strong>{formatSigned(rawProjectionGap(selectedRow))}</strong>
+                  </div>
+                  <div>
+                    <span>Adjusted gap</span>
+                    <strong>{formatSigned(adjustedProjectionGap(selectedRow))}</strong>
+                  </div>
+                  <div>
+                    <span>Data quality</span>
+                    <strong>{dataQuality(selectedRow)}/100</strong>
+                  </div>
+                  <div>
                     <span>Projected total</span>
                     <strong>{projectedTotal(selectedRow)}</strong>
                   </div>
@@ -630,6 +794,18 @@ function App() {
                     <small key={reason}>{reason}</small>
                   ))}
                 </div>
+                <div>
+                  <span>Risks</span>
+                  <strong>{confidenceLabel(selectedRow)} confidence</strong>
+                  {riskNotes(selectedRow).map((risk) => (
+                    <small key={risk}>{risk}</small>
+                  ))}
+                </div>
+                <div>
+                  <span>History</span>
+                  <strong>{selectedRow.sport} validation</strong>
+                  <small>{historyNote(selectedRow)}</small>
+                </div>
                 {formatWeatherImpact(selectedRow) ? (
                   <div>
                     <span>Weather</span>
@@ -647,8 +823,12 @@ function App() {
         <section className="board-panel">
           <div className="panel-heading">
             <div>
-              <h3>Ranked line breakdown</h3>
-              <p>Select a row to update the market breakdown above.</p>
+              <h3>{activePage === 'top10' ? 'Top 10 projection gaps' : 'Ranked line breakdown'}</h3>
+              <p>
+                {activePage === 'top10'
+                  ? 'Ranked by adjusted gap, then raw gap, confidence, and freshness.'
+                  : 'Select a row to update the market breakdown above.'}
+              </p>
             </div>
           </div>
 
@@ -663,13 +843,13 @@ function App() {
               Date<span>{sortLabel('date')}</span>
             </button>
             <button className={sortKey === 'line' ? 'active' : ''} onClick={() => toggleSort('line')} type="button">
-              Model<span>{sortLabel('line')}</span>
+              Market / Model<span>{sortLabel('line')}</span>
             </button>
             <button className={sortKey === 'gap' ? 'active' : ''} onClick={() => toggleSort('gap')} type="button">
               Gap<span>{sortLabel('gap')}</span>
             </button>
             <button className={sortKey === 'rating' ? 'active' : ''} onClick={() => toggleSort('rating')} type="button">
-              Rating<span>{sortLabel('rating')}</span>
+              Probability<span>{sortLabel('rating')}</span>
             </button>
             <button className={sortKey === 'weather' ? 'active' : ''} onClick={() => toggleSort('weather')} type="button">
               Weather<span>{sortLabel('weather')}</span>
@@ -680,8 +860,8 @@ function App() {
           </div>
 
           <div className="breakdown-list">
-            {rows.length ? (
-              rows.slice(0, 200).map((row, index) => {
+            {visibleRows.length ? (
+              visibleRows.slice(0, activePage === 'top10' ? 10 : 200).map((row, index) => {
                 const expanded = expandedRatingId === row.game_id
                 return (
                   <div className={`breakdown-item ${expanded ? 'expanded' : ''}`} key={row.game_id}>
@@ -715,7 +895,8 @@ function App() {
                       </span>
                       <span className="row-gap">
                         <span className="mobile-label">Gap</span>
-                        <strong>{formatSigned(spreadEdge(row))}</strong>
+                        <strong>{formatSigned(adjustedProjectionGap(row))}</strong>
+                        <small>raw {formatSigned(rawProjectionGap(row))}</small>
                       </span>
                       <span className="row-rating">
                         <span className="mobile-label">Rating</span>
@@ -731,6 +912,7 @@ function App() {
                           <strong>{ratingGrade(row)}</strong>
                           <span>{ratingPercent(row)}</span>
                         </button>
+                        <small>{confidenceLabel(row)} · DQ {dataQuality(row)}/100</small>
                       </span>
                       <span className="row-weather">
                         <span className="mobile-label">Weather</span>

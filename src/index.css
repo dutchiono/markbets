@@ -983,6 +983,32 @@ pre {
   padding: 14px;
 }
 
+.nav-card {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  border: 1px solid rgba(78, 152, 216, 0.35);
+  border-radius: 8px;
+  background: rgba(5, 21, 39, 0.86);
+  color: #dcefff;
+  padding: 13px 14px;
+  text-align: left;
+}
+
+.nav-card.selected {
+  border-color: #28b9ff;
+  background: rgba(36, 184, 255, 0.18);
+}
+
+.nav-card span {
+  font-size: 0.9rem;
+  font-weight: 950;
+}
+
+.nav-card small {
+  color: #9cc7e8;
+}
+
 .side-card h3 {
   margin: 0;
   color: #ffffff;
@@ -1048,6 +1074,39 @@ pre {
   border: 1px solid rgba(255, 196, 87, 0.35);
   background: rgba(111, 72, 9, 0.24);
   color: #ffe8b2;
+}
+
+.gap-controls {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 10px;
+  border: 1px solid rgba(34, 129, 207, 0.55);
+  border-radius: 10px;
+  background: rgba(5, 21, 39, 0.86);
+  padding: 12px;
+}
+
+.gap-controls label {
+  display: grid;
+  gap: 6px;
+}
+
+.gap-controls span {
+  color: #bddbf5;
+  font-size: 0.72rem;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+.gap-controls select,
+.gap-controls input {
+  min-height: 40px;
+  width: 100%;
+  border: 1px solid rgba(78, 152, 216, 0.42);
+  border-radius: 8px;
+  background: rgba(3, 14, 28, 0.78);
+  color: #ffffff;
+  padding: 8px 10px;
 }
 
 .detail-grid {
@@ -1237,7 +1296,8 @@ pre {
   .metrics,
   .templates,
   .detail-grid,
-  .performance-grid {
+  .performance-grid,
+  .gap-controls {
     grid-template-columns: 1fr;
   }
 

@@ -507,6 +507,77 @@ def gap_confidence(model_gap: float | None) -> int:
   return 52
 
 
+def data_quality_multiplier(score: int | float | None) -> float:
+  if score is None:
+    return 0.65
+  if score >= 90:
+    return 1.00
+  if score >= 80:
+    return 0.95
+  if score >= 70:
+    return 0.90
+  if score >= 60:
+    return 0.80
+  return 0.65
+
+
+def parsed_timestamp(value: str | None) -> datetime | None:
+  if not value:
+    return None
+  try:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+  except ValueError:
+    return None
+
+
+def market_data_quality(
+  sport: str,
+  bet_type: str,
+  model_context: dict[str, Any] | None,
+  impact: dict[str, Any] | None,
+  market: dict[str, Any],
+  recommended_price: float | None,
+  captured_at: str,
+) -> int:
+  score = 35
+  if model_context:
+    score += 25
+    if model_context.get("source") == "Blue Chip Analytics":
+      score += 8
+    elif sport == "NFL":
+      score += 6
+  if recommended_price is not None:
+    score += 10
+  if market.get("updated_time"):
+    updated = parsed_timestamp(market.get("updated_time"))
+    captured = parsed_timestamp(captured_at)
+    if updated and captured:
+      age_hours = max((captured - updated).total_seconds() / 3600, 0)
+      if age_hours <= 1:
+        score += 12
+      elif age_hours <= 12:
+        score += 8
+      elif age_hours <= 48:
+        score += 4
+  if sport == "NCAAF" and model_context and (model_context.get("weather") or {}).get("condition"):
+    score += 6
+  if impact:
+    score += 4
+  if bet_type == "total" and not (impact and impact.get("adjusted_total") is not None):
+    score = min(score, 58)
+  return round(clamp(score, 0, 100))
+
+
+def confidence_label(model_gap: float | None, data_quality: int) -> str:
+  if model_gap is None:
+    return "Low"
+  if model_gap >= 4 and data_quality >= 80:
+    return "High"
+  if model_gap >= 2 and data_quality >= 65:
+    return "Medium"
+  return "Low"
+
+
 def rating_grade(probability: float | None, edge: float | None, has_model: bool) -> str:
   if probability is None or not has_model:
     return "Even"
@@ -1000,6 +1071,8 @@ async def fetch_kalshi_board() -> tuple[list[dict[str, Any]], str]:
         positive_gap = display_gap or 0
         positive_edge = max(rating.get("edge") or 0, 0)
         edge_score = 0 if rating.get("grade") == "Even" else round(positive_gap * 10 + positive_edge * 10 + weather_score / 10, 2)
+        data_quality = market_data_quality(sport_name, bet_type, model_context, impact, market, recommended_price, captured_at)
+        adjusted_gap = None if display_gap is None else round(display_gap * data_quality_multiplier(data_quality), 2)
 
         board.append(
           {
@@ -1050,8 +1123,12 @@ async def fetch_kalshi_board() -> tuple[list[dict[str, Any]], str]:
             "rating": rating,
             "metrics": {
               "model_market_gap": display_gap,
+              "raw_projection_gap": display_gap,
+              "adjusted_projection_gap": adjusted_gap,
               "line_move": price_move,
               "confidence_score": gap_confidence(display_gap),
+              "data_quality": data_quality,
+              "confidence_label": confidence_label(display_gap, data_quality),
             },
             "updated_at": market.get("updated_time") or captured_at,
           }
@@ -1215,4 +1292,55 @@ async def board() -> dict[str, Any]:
     "source": source,
     "status": status,
     "rows": rows,
+  }
+
+
+def is_pregame_row(row: dict[str, Any]) -> bool:
+  commence = parsed_timestamp(row.get("commence_time"))
+  return commence is None or commence > datetime.now(timezone.utc)
+
+
+@app.get("/api/top-projection-gaps")
+async def top_projection_gaps(
+  week: str = "current",
+  limit: int = 10,
+  leagues: str = "NFL,NCAAF",
+  markets: str = "spread",
+  min_gap: float = 1.0,
+  min_confidence: int = 0,
+) -> dict[str, Any]:
+  rows, status = await fetch_kalshi_board()
+  allowed_leagues = {league.strip().upper() for league in leagues.split(",") if league.strip()}
+  allowed_markets = {market.strip().lower() for market in markets.split(",") if market.strip()}
+  if "all" in allowed_markets:
+    allowed_markets = {"spread", "total", "moneyline"}
+  if "ALL" in allowed_leagues:
+    allowed_leagues = {"NFL", "NCAAF"}
+
+  candidates = [
+    row
+    for row in rows
+    if row.get("sport") in allowed_leagues
+    and (row.get("bet_type") or "spread") in allowed_markets
+    and is_pregame_row(row)
+    and ((row.get("metrics") or {}).get("raw_projection_gap") or 0) >= min_gap
+    and ((row.get("metrics") or {}).get("confidence_score") or 0) >= min_confidence
+  ]
+  candidates.sort(
+    key=lambda row: (
+      (row.get("metrics") or {}).get("adjusted_projection_gap") or 0,
+      (row.get("metrics") or {}).get("raw_projection_gap") or 0,
+      (row.get("metrics") or {}).get("confidence_score") or 0,
+      row.get("updated_at") or "",
+    ),
+    reverse=True,
+  )
+
+  return {
+    "generated_at": now_iso(),
+    "source": "kalshi",
+    "status": f"{status}; top projection gaps week={week}",
+    "week": week,
+    "limit": limit,
+    "rows": candidates[: max(1, min(limit, 50))],
   }
