@@ -1260,6 +1260,197 @@ pre {
   color: #ffffff;
 }
 
+.page-top10 .content {
+  gap: 10px;
+  padding: 14px;
+}
+
+.page-top10 .topbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.page-top10 .topbar h2 {
+  font-size: clamp(1.35rem, 2vw, 2rem);
+}
+
+.page-top10 .board-meta {
+  margin-top: 4px;
+  font-size: 0.84rem;
+}
+
+.page-top10 .gap-controls {
+  grid-template-columns: 1.1fr 1fr 0.9fr 0.7fr 0.85fr;
+  padding: 9px;
+}
+
+.page-top10 .gap-controls span {
+  font-size: 0.66rem;
+}
+
+.page-top10 .gap-controls select,
+.page-top10 .gap-controls input {
+  min-height: 34px;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 0.86rem;
+}
+
+.page-top10 .detail-grid {
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  gap: 10px;
+}
+
+.page-top10 .detail-main,
+.page-top10 .detail-stack div {
+  border-radius: 8px;
+}
+
+.page-top10 .detail-main {
+  padding: 14px;
+}
+
+.page-top10 .ticket-head {
+  align-items: center;
+  padding-bottom: 12px;
+}
+
+.page-top10 .ticket-head h3 {
+  font-size: clamp(1.2rem, 2vw, 1.85rem);
+  line-height: 1.05;
+}
+
+.page-top10 .ticket-head p:not(.eyebrow) {
+  margin-top: 4px;
+  font-size: 0.9rem;
+}
+
+.page-top10 .ticket-rating {
+  min-width: 112px;
+  min-height: 60px;
+  border-radius: 7px;
+  padding: 8px 10px;
+}
+
+.page-top10 .ticket-rating strong {
+  font-size: 1.25rem;
+}
+
+.page-top10 .ticket-grid {
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.page-top10 .ticket-grid div {
+  min-height: 66px;
+  padding: 10px;
+}
+
+.page-top10 .ticket-grid span,
+.page-top10 .detail-stack span {
+  font-size: 0.66rem;
+}
+
+.page-top10 .ticket-grid strong {
+  font-size: 0.95rem;
+  line-height: 1.15;
+}
+
+.page-top10 .ticket-grid small {
+  color: #90b5d4;
+  font-size: 0.74rem;
+}
+
+.page-top10 .detail-stack {
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.page-top10 .detail-stack div {
+  gap: 4px;
+  min-height: 0;
+  padding: 12px;
+}
+
+.page-top10 .detail-stack strong {
+  font-size: 1rem;
+}
+
+.page-top10 .detail-stack small {
+  font-size: 0.8rem;
+  line-height: 1.28;
+}
+
+.page-top10 .board-panel {
+  max-height: min(52vh, 560px);
+  overflow: auto;
+}
+
+.page-top10 .panel-heading {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  padding: 11px 14px;
+  background: rgba(5, 22, 39, 0.98);
+}
+
+.page-top10 .panel-heading h3 {
+  font-size: 1rem;
+}
+
+.page-top10 .panel-heading p {
+  margin-top: 2px;
+  font-size: 0.82rem;
+}
+
+.page-top10 .breakdown-header {
+  position: sticky;
+  top: 61px;
+  z-index: 3;
+  grid-template-columns: 40px minmax(170px, 1fr) minmax(108px, 0.66fr) minmax(188px, 1.12fr) minmax(92px, 0.52fr) minmax(118px, 0.7fr) minmax(100px, 0.58fr) minmax(86px, 0.5fr);
+  gap: 10px;
+  padding: 8px 12px;
+}
+
+.page-top10 .breakdown-row {
+  grid-template-columns: 40px minmax(170px, 1fr) minmax(108px, 0.66fr) minmax(188px, 1.12fr) minmax(92px, 0.52fr) minmax(118px, 0.7fr) minmax(100px, 0.58fr) minmax(86px, 0.5fr);
+  gap: 10px;
+  min-height: 68px;
+  padding: 10px 12px;
+}
+
+.page-top10 .row-game strong,
+.page-top10 .row-market strong {
+  font-size: 0.92rem;
+}
+
+.page-top10 .breakdown-row small,
+.page-top10 .row-date strong,
+.page-top10 .row-market strong,
+.page-top10 .row-weather strong,
+.page-top10 .row-odds strong {
+  font-size: 0.82rem;
+}
+
+.page-top10 .rating-pill {
+  min-width: 86px;
+  min-height: 34px;
+  padding: 4px 8px;
+}
+
+.page-top10 .rating-pill + small {
+  display: block;
+  margin-top: 4px;
+  color: #92b7d4;
+  font-size: 0.72rem;
+}
+
+.page-top10 .rank {
+  width: 28px;
+  height: 28px;
+}
+
 @media (max-width: 900px) {
   .shell {
     grid-template-columns: 1fr;
@@ -1383,5 +1574,35 @@ pre {
 
   .ticket-grid {
     grid-template-columns: 1fr;
+  }
+
+  .page-top10 .content {
+    padding: 10px;
+  }
+
+  .page-top10 .gap-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .page-top10 .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .page-top10 .ticket-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .page-top10 .board-panel {
+    max-height: none;
+  }
+
+  .page-top10 .panel-heading,
+  .page-top10 .breakdown-header {
+    position: static;
+  }
+
+  .page-top10 .breakdown-row {
+    grid-template-columns: 36px minmax(0, 1fr);
+    min-height: 0;
   }
 }

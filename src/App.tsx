@@ -569,7 +569,7 @@ function App() {
   }
 
   return (
-    <main className="shell">
+    <main className={`shell page-${activePage}`}>
       <header className="app-header">
         <div className="header-brand">
           <span className="brand-ball">MB</span>
