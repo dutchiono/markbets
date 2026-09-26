@@ -29,13 +29,89 @@ KALSHI_MARKET_SERIES = {
 }
 BLUECHIP_WEEK_URL = os.getenv("BLUECHIP_WEEK_URL", "https://bluechipanalytics.com/college-football/games/2026/week4/")
 BLUECHIP_CACHE_SECONDS = int(os.getenv("BLUECHIP_CACHE_SECONDS", "1800"))
+NFL_POWER_RATINGS_URL = os.getenv("NFL_POWER_RATINGS_URL", "https://stats.innerpulse.net/teams")
+NFL_RATINGS_CACHE_SECONDS = int(os.getenv("NFL_RATINGS_CACHE_SECONDS", "1800"))
 KALSHI_INCLUDE_UNMODELED = os.getenv("KALSHI_INCLUDE_UNMODELED", "true").lower() in {"1", "true", "yes"}
 ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("MARKBETS_DB", ROOT / "data" / "markbets.sqlite3"))
 PROJECTIONS_PATH = Path(os.getenv("MARKBETS_PROJECTIONS", ROOT / "data" / "projections.csv"))
+TEAM_RATINGS_PATH = Path(os.getenv("MARKBETS_TEAM_RATINGS", ROOT.parent / "public" / "data" / "ratings.csv"))
 
 app = FastAPI(title="MarkBets API")
 BLUECHIP_CACHE: dict[str, Any] = {"expires_at": 0.0, "games": {}}
+NFL_RATINGS_CACHE: dict[str, Any] = {"expires_at": 0.0, "ratings": {}}
+TEAM_KEY_ALIASES = {
+  "ari_cardinals": "arizona_cardinals",
+  "arizona": "arizona_cardinals",
+  "atl_falcons": "atlanta_falcons",
+  "atlanta": "atlanta_falcons",
+  "bal_ravens": "baltimore_ravens",
+  "baltimore": "baltimore_ravens",
+  "buf_bills": "buffalo_bills",
+  "buffalo": "buffalo_bills",
+  "car_panthers": "carolina_panthers",
+  "carolina": "carolina_panthers",
+  "chi_bears": "chicago_bears",
+  "chicago": "chicago_bears",
+  "cin_bengals": "cincinnati_bengals",
+  "cincinnati": "cincinnati_bengals",
+  "cle_browns": "cleveland_browns",
+  "cleveland": "cleveland_browns",
+  "dal_cowboys": "dallas_cowboys",
+  "dallas": "dallas_cowboys",
+  "den_broncos": "denver_broncos",
+  "denver": "denver_broncos",
+  "det_lions": "detroit_lions",
+  "detroit": "detroit_lions",
+  "gb_packers": "green_bay_packers",
+  "green_bay": "green_bay_packers",
+  "hou_texans": "houston_texans",
+  "houston": "houston_texans",
+  "ind_colts": "indianapolis_colts",
+  "indianapolis": "indianapolis_colts",
+  "jac_jaguars": "jacksonville_jaguars",
+  "jax_jaguars": "jacksonville_jaguars",
+  "jacksonville": "jacksonville_jaguars",
+  "kc_chiefs": "kansas_city_chiefs",
+  "kansas_city": "kansas_city_chiefs",
+  "la_chargers": "los_angeles_chargers",
+  "lac_chargers": "los_angeles_chargers",
+  "la_rams": "los_angeles_rams",
+  "lar_rams": "los_angeles_rams",
+  "los_angeles": "los_angeles_chargers",
+  "los_angeles_c": "los_angeles_chargers",
+  "los_angeles_r": "los_angeles_rams",
+  "lv_raiders": "las_vegas_raiders",
+  "las_vegas": "las_vegas_raiders",
+  "mia_dolphins": "miami_dolphins",
+  "miami": "miami_dolphins",
+  "min_vikings": "minnesota_vikings",
+  "minnesota": "minnesota_vikings",
+  "ne_patriots": "new_england_patriots",
+  "new_england": "new_england_patriots",
+  "no_saints": "new_orleans_saints",
+  "new_orleans": "new_orleans_saints",
+  "ny_giants": "new_york_giants",
+  "ny_jets": "new_york_jets",
+  "new_york_g": "new_york_giants",
+  "new_york_j": "new_york_jets",
+  "nyg_giants": "new_york_giants",
+  "nyj_jets": "new_york_jets",
+  "phi_eagles": "philadelphia_eagles",
+  "philadelphia": "philadelphia_eagles",
+  "pit_steelers": "pittsburgh_steelers",
+  "pittsburgh": "pittsburgh_steelers",
+  "sea_seahawks": "seattle_seahawks",
+  "seattle": "seattle_seahawks",
+  "sf_49ers": "san_francisco_49ers",
+  "san_francisco": "san_francisco_49ers",
+  "tb_buccaneers": "tampa_bay_buccaneers",
+  "tampa_bay": "tampa_bay_buccaneers",
+  "ten_titans": "tennessee_titans",
+  "tennessee": "tennessee_titans",
+  "was_commanders": "washington_commanders",
+  "washington": "washington_commanders",
+}
 
 
 def now_iso() -> str:
@@ -60,7 +136,8 @@ def team_key(value: str) -> str:
   normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
   normalized = re.sub(r"\bst[.]?\b", "state", normalized, flags=re.I)
   normalized = normalized.replace("&", " and ")
-  return slugify(normalized)
+  key = slugify(normalized)
+  return TEAM_KEY_ALIASES.get(key, key)
 
 
 def connect() -> sqlite3.Connection:
@@ -190,12 +267,11 @@ def opponent_team(away_team: str, home_team: str, team: str | None) -> str | Non
 
 
 def contract_side_team(market: dict[str, Any]) -> str | None:
-  subtitle = clean_text(market.get("yes_sub_title"))
-  if subtitle:
-    return subtitle
-  label = market.get("title") or ""
+  label = clean_text(market.get("yes_sub_title")) or clean_text(market.get("title")) or ""
   match = re.match(r"(.+?) wins\b", label.replace("?", ""), re.I)
-  return clean_text(match.group(1)) if match else None
+  if match:
+    return clean_text(match.group(1))
+  return label or None
 
 
 def contract_model_gap(bet_type: str, market: dict[str, Any], bluechip: dict[str, Any] | None, impact: dict[str, Any] | None) -> float | None:
@@ -481,7 +557,7 @@ def rating_for_market(bet_type: str, market: dict[str, Any], bluechip: dict[str,
     reasons.append(f"Market odds imply about {market_probability * 100:.1f}%; no model edge is counted yet.")
 
   if bluechip and bluechip.get("model_line"):
-    reasons.append(f"Blue Chip model: {bluechip['model_line']} vs market {bluechip.get('market_line') or 'line unavailable'}.")
+    reasons.append(f"{bluechip.get('source') or 'Model'}: {bluechip['model_line']} vs market {bluechip.get('market_line') or 'line unavailable'}.")
 
   if impact and abs(impact.get("total_adjustment") or 0) >= 0.1:
     reasons.append(f"Weather adjusts the total by {impact['total_adjustment']:+.1f} points.")
@@ -493,6 +569,30 @@ def rating_for_market(bet_type: str, market: dict[str, Any], bluechip: dict[str,
     "summary": f"{grade}: {probability:.1f}% model lean on {line}" if probability is not None and has_model else f"{grade}: model lean unavailable for {line}",
     "reasons": reasons,
   }
+
+
+def total_edge_side(market: dict[str, Any], model_gap: float) -> str:
+  label = f"{market.get('yes_sub_title') or ''} {market.get('title') or ''}".lower()
+  yes_side = "Under" if "under" in label else "Over"
+  if model_gap >= 0:
+    return yes_side
+  return "Over" if yes_side == "Under" else "Under"
+
+
+def recommended_market_side(bet_type: str, market: dict[str, Any], away_team: str, home_team: str, model_gap: float | None) -> tuple[str | None, str | None]:
+  if model_gap is None:
+    return None, None
+  side_team = contract_side_team(market)
+  if bet_type == "total":
+    edge_side = total_edge_side(market, model_gap)
+    yes_side = "Under" if edge_side == "Under" and model_gap >= 0 else "Over" if edge_side == "Over" and model_gap >= 0 else None
+    contract_side = "Yes" if yes_side else "No"
+    return edge_side, contract_side
+  if not side_team:
+    return None, None
+  if model_gap >= 0:
+    return side_team, "Yes"
+  return opponent_team(away_team, home_team, side_team), "No"
 
 
 def parse_bluechip_game(page: str, url: str) -> dict[str, Any] | None:
@@ -646,6 +746,65 @@ async def fetch_bluechip_games() -> dict[str, dict[str, Any]]:
     return keyed
 
 
+async def fetch_nfl_power_ratings() -> dict[str, dict[str, Any]]:
+  if not NFL_POWER_RATINGS_URL:
+    return {}
+  now = time.time()
+  if NFL_RATINGS_CACHE["expires_at"] > now:
+    return NFL_RATINGS_CACHE["ratings"]
+
+  try:
+    async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+      response = await client.get(NFL_POWER_RATINGS_URL)
+      response.raise_for_status()
+      page = response.text
+  except Exception:
+    return NFL_RATINGS_CACHE.get("ratings") or {}
+
+  page_text = plain_text(page)
+  updated_match = re.search(r"Updated\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2},\s+[^.]+?EDT)", page_text, re.I)
+  if not updated_match:
+    updated_match = re.search(r"updated\s+([^<.]+?\s+ET)\s+Power rankings", page_text, re.I)
+  updated_at = clean_text(updated_match.group(1)) if updated_match else now_iso()
+  ratings: dict[str, dict[str, Any]] = {}
+  for match in re.finditer(r'<tr data-href="/team/(?P<abbr>[^"]+)">(?P<body>.*?)</tr>', page, re.I | re.S):
+    body = match.group("body")
+    team_match = re.search(r'alt="(?P<team>[^"]+)"', body, re.I)
+    rating_match = re.search(r'class="num sc"[^>]*data-sort="(?P<rating>[+-]?\d+(?:\.\d+)?)"', body, re.I)
+    if not team_match or not rating_match:
+      continue
+
+    team = clean_text(team_match.group("team")) or ""
+    rating = dollars_to_float(rating_match.group("rating"))
+    if not team or rating is None:
+      continue
+
+    last_word = team.split()[-1]
+    record_match = re.search(r'<td class="txt"[^>]*data-sort="(?P<record>[^"]+)"', body, re.I)
+    entry = {
+      "team": team,
+      "rating": rating,
+      "raw_rating": rating,
+      "adjustment": 0.0,
+      "source": "Innerpulse NFL power ratings",
+      "url": NFL_POWER_RATINGS_URL,
+      "updated_at": updated_at,
+      "record": clean_text(record_match.group("record")) if record_match else None,
+    }
+    keys = {
+      team_key(team),
+      team_key(match.group("abbr")),
+      team_key(f"{match.group('abbr')} {last_word}"),
+      team_key(last_word),
+    }
+    for key in keys:
+      ratings[key] = entry
+
+  if ratings:
+    NFL_RATINGS_CACHE.update({"expires_at": now + NFL_RATINGS_CACHE_SECONDS, "ratings": ratings})
+  return ratings
+
+
 def load_projections() -> dict[str, dict[str, Any]]:
   if not PROJECTIONS_PATH.exists():
     return {}
@@ -660,6 +819,74 @@ def load_projections() -> dict[str, dict[str, Any]]:
       for row in rows
       if row.get("game_id") and row.get("fair_spread")
     }
+
+
+def load_team_ratings() -> dict[str, dict[str, dict[str, Any]]]:
+  if not TEAM_RATINGS_PATH.exists():
+    return {}
+  ratings: dict[str, dict[str, dict[str, Any]]] = {}
+  with TEAM_RATINGS_PATH.open(newline="", encoding="utf-8") as f:
+    for row in csv.DictReader(f):
+      sport = (row.get("sport") or "").upper()
+      team = row.get("team") or ""
+      rating = dollars_to_float(row.get("power_rating"))
+      if not sport or not team or rating is None:
+        continue
+      adjustment = fp_to_float(row.get("injury_adj")) + fp_to_float(row.get("form_adj"))
+      ratings.setdefault(sport, {})[team_key(team)] = {
+        "team": team,
+        "rating": rating + adjustment,
+        "raw_rating": rating,
+        "adjustment": adjustment,
+      }
+  return ratings
+
+
+def ratings_model_game(sport: str, away_team: str, home_team: str, ratings: dict[str, dict[str, dict[str, Any]]]) -> dict[str, Any] | None:
+  sport_ratings = ratings.get(sport.upper()) or {}
+  away = sport_ratings.get(team_key(away_team))
+  home = sport_ratings.get(team_key(home_team))
+  if not away or not home:
+    return None
+  home_field = 1.5 if sport.upper() == "NFL" else 2.5
+  home_margin = round(float(home["rating"]) + home_field - float(away["rating"]), 1)
+  if home_margin >= 0:
+    model_team = home_team
+    model_spread = -home_margin
+  else:
+    model_team = away_team
+    model_spread = home_margin
+  source = home.get("source") or away.get("source") or "Team power ratings"
+  source_url = home.get("url") or away.get("url")
+  updated_at = home.get("updated_at") or away.get("updated_at") or now_iso()
+  return {
+    "away_team": away_team,
+    "home_team": home_team,
+    "market_line": None,
+    "model_line": signed_line(model_team, model_spread),
+    "market_team": None,
+    "model_team": model_team,
+    "market_spread": None,
+    "model_spread": model_spread,
+    "gap": None,
+    "edge_team": None,
+    "book_spread": None,
+    "book_total": None,
+    "odds_implied_score": None,
+    "betting_source": None,
+    "summary": f"{sport} rating model makes this {signed_line(model_team, model_spread)} from {away['team']} {float(away['rating']):+.1f} and {home['team']} {float(home['rating']):+.1f}.",
+    "weather": {
+      "venue": None,
+      "condition": None,
+      "temperature_f": None,
+      "wind_mph": None,
+      "source": "not attached",
+      "map_url": None,
+    },
+    "source": source,
+    "url": source_url,
+    "updated_at": updated_at,
+  }
 
 
 async def fetch_odds() -> tuple[list[dict[str, Any]], str]:
@@ -713,6 +940,10 @@ async def fetch_kalshi_board() -> tuple[list[dict[str, Any]], str]:
   captured_at = now_iso()
   board: list[dict[str, Any]] = []
   bluechip_games = await fetch_bluechip_games()
+  team_ratings = load_team_ratings()
+  nfl_power_ratings = await fetch_nfl_power_ratings()
+  if nfl_power_ratings:
+    team_ratings.setdefault("NFL", {}).update(nfl_power_ratings)
   raw_count = 0
   async with httpx.AsyncClient(timeout=25) as client:
     for (sport_name, bet_type), series_ticker in KALSHI_MARKET_SERIES.items():
@@ -734,9 +965,10 @@ async def fetch_kalshi_board() -> tuple[list[dict[str, Any]], str]:
         raw_count += 1
         away_team, home_team = extract_matchup(market)
         bluechip = bluechip_games.get(matchup_key(away_team, home_team)) if sport_name == "NCAAF" else None
+        model_context = bluechip or ratings_model_game(sport_name, away_team, home_team, team_ratings)
         if sport_name == "NCAAF" and bluechip_games and not bluechip:
           continue
-        if sport_name != "NCAAF" and not KALSHI_INCLUDE_UNMODELED:
+        if sport_name != "NCAAF" and not KALSHI_INCLUDE_UNMODELED and not model_context:
           continue
         yes_bid = dollars_to_float(market.get("yes_bid_dollars"))
         yes_ask = dollars_to_float(market.get("yes_ask_dollars"))
@@ -747,14 +979,25 @@ async def fetch_kalshi_board() -> tuple[list[dict[str, Any]], str]:
         price_move = None
         if last_price is not None and previous_price is not None and previous_price > 0:
           price_move = round((last_price - previous_price) * 100, 1)
-        cover_price = yes_bid if yes_bid is not None else last_price
-        baseline_total = dollars_to_float(market.get("floor_strike")) if bet_type == "total" else dollars_to_float((bluechip or {}).get("book_total"))
+        baseline_total = dollars_to_float(market.get("floor_strike")) if bet_type == "total" else dollars_to_float((model_context or {}).get("book_total"))
         impact = weather_impact(bluechip, baseline_total)
-        projection = projection_summary(away_team, home_team, bluechip, impact)
-        model_gap = contract_model_gap(bet_type, market, bluechip, impact)
-        rating = rating_for_market(bet_type, market, bluechip, impact, model_gap, cover_price)
+        model_gap = contract_model_gap(bet_type, market, model_context, impact)
+        display_gap = None if model_gap is None else abs(model_gap)
+        edge_side, recommended_side = recommended_market_side(bet_type, market, away_team, home_team, model_gap)
+        recommended_price = (yes_bid if yes_bid is not None else last_price) if recommended_side != "No" else (no_bid if no_bid is not None else None)
+        if model_context and model_gap is not None:
+          model_context = dict(model_context)
+          model_context["gap"] = display_gap
+          model_context["edge_team"] = edge_side
+        projection = projection_summary(away_team, home_team, model_context, impact)
+        rating = rating_for_market(bet_type, market, model_context, impact, display_gap, recommended_price)
+        if edge_side and rating.get("probability") is not None:
+          rating = dict(rating)
+          market_phrase = "to cover" if bet_type == "spread" else "to win" if bet_type == "moneyline" else edge_side
+          target = f"{edge_side} {market_phrase}" if bet_type != "total" else edge_side
+          rating["summary"] = f"{rating['grade']}: {float(rating['probability']):.1f}% model lean on {target}"
         weather_score = impact.get("score", 0) if impact else 0
-        positive_gap = max(model_gap or 0, 0) if bet_type != "moneyline" else 0
+        positive_gap = display_gap or 0
         positive_edge = max(rating.get("edge") or 0, 0)
         edge_score = 0 if rating.get("grade") == "Even" else round(positive_gap * 10 + positive_edge * 10 + weather_score / 10, 2)
 
@@ -788,31 +1031,34 @@ async def fetch_kalshi_board() -> tuple[list[dict[str, Any]], str]:
               "last_price": last_price,
               "previous_price": previous_price,
               "price_move": price_move,
+              "recommended_side": recommended_side,
+              "recommended_label": edge_side,
+              "recommended_price": recommended_price,
               "volume": fp_to_float(market.get("volume_fp")),
               "volume_24h": fp_to_float(market.get("volume_24h_fp")),
               "open_interest": fp_to_float(market.get("open_interest_fp")),
               "status": market.get("status"),
             },
             "model": {
-              "fair_spread": bluechip.get("model_spread") if bluechip else None,
-              "source": bluechip.get("source") if bluechip else None,
-              "updated_at": bluechip.get("updated_at") if bluechip else None,
+              "fair_spread": model_context.get("model_spread") if model_context else None,
+              "source": model_context.get("source") if model_context else None,
+              "updated_at": model_context.get("updated_at") if model_context else None,
             },
-            "bluechip": bluechip,
+            "bluechip": model_context,
             "weather_impact": impact,
             "projection": projection,
             "rating": rating,
             "metrics": {
-              "model_market_gap": model_gap,
+              "model_market_gap": display_gap,
               "line_move": price_move,
-              "confidence_score": gap_confidence(model_gap),
+              "confidence_score": gap_confidence(display_gap),
             },
             "updated_at": market.get("updated_time") or captured_at,
           }
         )
 
   ranked_rows = collapse_board_rows(board)
-  return ranked_rows, f"Fetched {raw_count} Kalshi contracts; using {len(bluechip_games)} Blue Chip NCAAF games and showing {len(ranked_rows)} ranked lines"
+  return ranked_rows, f"Fetched {raw_count} Kalshi contracts; using {len(bluechip_games)} Blue Chip NCAAF games and {len(nfl_power_ratings)} NFL rating keys; showing {len(ranked_rows)} ranked lines"
 
 
 def store_snapshots(rows: list[dict[str, Any]]) -> None:

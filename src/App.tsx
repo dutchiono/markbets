@@ -39,6 +39,9 @@ type BoardRow = {
     last_price: number | null
     previous_price: number | null
     price_move: number | null
+    recommended_side?: 'Yes' | 'No' | null
+    recommended_label?: string | null
+    recommended_price?: number | null
     volume: number
     volume_24h: number
     open_interest: number
@@ -164,7 +167,14 @@ function formatSigned(value: number | null, digits = 1) {
 }
 
 function coverOdds(row: BoardRow) {
-  return row.contract?.last_price ?? row.contract?.yes_bid ?? row.contract?.yes_ask ?? null
+  return row.contract?.recommended_price ?? row.contract?.last_price ?? row.contract?.yes_bid ?? row.contract?.yes_ask ?? null
+}
+
+function oddsSide(row: BoardRow) {
+  const side = row.contract?.recommended_side
+  const label = row.contract?.recommended_label
+  if (!side || !label) return 'Market price'
+  return `${side}: ${label}`
 }
 
 function modelGap(row: BoardRow) {
@@ -440,8 +450,19 @@ function App() {
     if (!latest) return row.updated_at
     return new Date(row.updated_at) > new Date(latest) ? row.updated_at : latest
   }, null)
+  const topRatedRows = rows.filter((row) => ratingGrade(row) !== 'Even').length
+  const averageEdge = rows.length
+    ? rows.reduce((total, row) => total + Math.max(spreadEdge(row) ?? 0, 0), 0) / rows.length
+    : null
+  const hasModelRows = rows.some((row) => row.projection?.model_label || row.bluechip?.model_line)
   const modelSource =
-    selectedSport === 'NCAAF' ? 'Blue Chip model' : selectedSport === 'NFL' ? 'Model pending' : 'Models where available'
+    selectedSport === 'NCAAF'
+      ? 'Blue Chip model'
+      : selectedSport === 'NFL' && hasModelRows
+        ? 'Team ratings model'
+        : selectedSport === 'NFL'
+          ? 'Model pending'
+          : 'Models where available'
   const oddsSource = board.source === 'preview' ? 'Preview odds' : board.source === 'kalshi' ? 'Kalshi odds' : 'Sportsbook odds'
 
   function toggleSort(nextKey: SortKey) {
@@ -460,14 +481,37 @@ function App() {
 
   return (
     <main className="shell">
-      <aside className="sidebar" aria-label="Controls">
-        <div className="brand">
-          <span className="brand-mark">MB</span>
+      <header className="app-header">
+        <div className="header-brand">
+          <span className="brand-ball">MB</span>
           <div>
-            <p>MarkBets</p>
-            <h1>Coverage Desk</h1>
+            <strong>MARKBETS EDGE</strong>
+            <small>AI powered football analytics</small>
           </div>
         </div>
+        <nav className="app-nav" aria-label="Main">
+          {([
+            ['ALL', "Today's Board"],
+            ['NCAAF', 'NCAA'],
+            ['NFL', 'NFL'],
+          ] as [SportLabel, string][]).map(([sport, label]) => (
+            <button
+              className={selectedSport === sport ? 'selected' : ''}
+              key={sport}
+              onClick={() => setSelectedSport(sport)}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+          <button type="button">My Picks</button>
+          <button type="button">Model Performance</button>
+        </nav>
+        <div className="header-date">{latestUpdate ? formatDate(latestUpdate) : 'Loading'}</div>
+      </header>
+
+      <aside className="sidebar" aria-label="Controls">
+        <h2 className="sidebar-title">Filters</h2>
 
         <label className="field">
           <span>Team search</span>
@@ -499,19 +543,40 @@ function App() {
           <span>{refreshing ? 'Updating now' : 'Auto-updates every 5 min'}</span>
           <small>{rows.length.toLocaleString()} ranked lines</small>
         </div>
+
+        <div className="side-card">
+          <h3>Quick stats</h3>
+          <p><span>Total lines</span><strong>{rows.length.toLocaleString()}</strong></p>
+          <p><span>Top rated</span><strong>{topRatedRows.toLocaleString()}</strong></p>
+          <p><span>Avg edge</span><strong>{formatSigned(averageEdge)}</strong></p>
+        </div>
+
+        <div className="side-card legend-card">
+          <h3>Ranking legend</h3>
+          <p><b>1</b><span>Excellent</span></p>
+          <p><b>2</b><span>Great</span></p>
+          <p><b>3</b><span>Good</span></p>
+          <p><b>4</b><span>Watch</span></p>
+        </div>
       </aside>
 
       <section className="content">
         <div className="topbar">
           <div>
             <p className="eyebrow">{selectedSport === 'ALL' ? 'All football' : selectedSport} board</p>
-            <h2>Best edges</h2>
+            <h2>{selectedSport === 'NFL' ? 'NFL market board' : 'Best model edges'}</h2>
             <p className="board-meta">
               {rows.length.toLocaleString()} lines · Top gap {formatSigned(topGap)} · {modelSource} · {oddsSource}
               {latestUpdate ? ` · Updated ${formatDate(latestUpdate)}` : ''}
             </p>
           </div>
         </div>
+
+        {selectedSport === 'NFL' && !hasModelRows ? (
+          <div className="notice model-notice">
+            NFL odds are live, but no NFL projection model is attached yet. To rank true edges here, we need to add an NFL model feed such as ELO/power ratings, market consensus, or a paid odds/projection API.
+          </div>
+        ) : null}
 
         <section className="detail-grid">
           {selectedRow ? (
@@ -553,6 +618,7 @@ function App() {
                   <div>
                     <span>Odds</span>
                     <strong>{formatCents(coverOdds(selectedRow))}</strong>
+                    <small>{oddsSide(selectedRow)}</small>
                   </div>
                 </div>
               </div>
@@ -674,7 +740,7 @@ function App() {
                       <span className="row-odds">
                         <span className="mobile-label">Odds</span>
                         <strong>{formatCents(coverOdds(row))}</strong>
-                        <small>Total {projectedTotal(row)}</small>
+                        <small>{oddsSide(row)}</small>
                       </span>
                     </div>
                     {expanded ? (
