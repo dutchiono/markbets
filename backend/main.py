@@ -312,9 +312,41 @@ def board_group_key(row: dict[str, Any]) -> str:
   )
 
 
+def contract_yes_midpoint(contract: dict[str, Any]) -> float | None:
+  bid = dollars_to_float(contract.get("yes_bid"))
+  ask = dollars_to_float(contract.get("yes_ask"))
+  last = dollars_to_float(contract.get("last_price"))
+  if bid is not None and ask is not None:
+    return (bid + ask) / 2
+  return last
+
+
+def market_balance_distance(row: dict[str, Any]) -> float:
+  contract = row.get("contract") or {}
+  midpoint = contract_yes_midpoint(contract)
+  if midpoint is None:
+    return 1
+  return abs(midpoint - 0.5)
+
+
 def best_board_row(current: dict[str, Any] | None, candidate: dict[str, Any]) -> dict[str, Any]:
   if current is None:
     return candidate
+  bet_type = candidate.get("bet_type") or current.get("bet_type")
+  if bet_type in {"spread", "total"}:
+    current_score = (
+      -market_balance_distance(current),
+      (current.get("contract") or {}).get("volume") or 0,
+      (current.get("contract") or {}).get("open_interest") or 0,
+      current.get("updated_at") or "",
+    )
+    candidate_score = (
+      -market_balance_distance(candidate),
+      (candidate.get("contract") or {}).get("volume") or 0,
+      (candidate.get("contract") or {}).get("open_interest") or 0,
+      candidate.get("updated_at") or "",
+    )
+    return candidate if candidate_score > current_score else current
   current_rating = current.get("rating") or {}
   candidate_rating = candidate.get("rating") or {}
   current_metrics = current.get("metrics") or {}
@@ -1107,6 +1139,7 @@ async def fetch_kalshi_board() -> tuple[list[dict[str, Any]], str]:
               "recommended_side": recommended_side,
               "recommended_label": edge_side,
               "recommended_price": recommended_price,
+              "market_balance": None if yes_bid is None and yes_ask is None and last_price is None else round(abs(((yes_bid + yes_ask) / 2 if yes_bid is not None and yes_ask is not None else last_price or 0) - 0.5), 3),
               "volume": fp_to_float(market.get("volume_fp")),
               "volume_24h": fp_to_float(market.get("volume_24h_fp")),
               "open_interest": fp_to_float(market.get("open_interest_fp")),
